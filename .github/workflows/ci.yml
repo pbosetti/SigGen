@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (Clang)
+            os: ubuntu-latest
+            cc: clang
+            cxx: clang++
+          - name: macOS (Clang)
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+          - name: Windows (MSVC)
+            os: windows-latest
+            cc: cl
+            cxx: cl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DSIGGEN_BUILD_TESTS=ON
+          -DSIGGEN_BUILD_TOOL=ON
+          -DSIGGEN_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Smoke-test the CLI (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ./build/siggen --type sine --frequency 10 --rate 200 --samples 40 --plot
+          ./build/siggen --type sine --frequency 10 --samples 5 --format csv
+          ./build/siggen --config example/config.json --plot --ascii --samples 200
+          echo '{"type":"pink_noise","sigma":2}' | ./build/siggen -n 5 -f json
+
+      - name: Smoke-test the CLI (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          ./build/siggen.exe --type sine --frequency 10 --rate 200 --samples 40 --plot
+          ./build/siggen.exe --config example/config.json --plot --ascii --samples 200
+
+      - name: Run the example
+        if: runner.os != 'Windows'
+        run: ./build/siggen_example
+
+  consumability:
+    name: FetchContent consumability
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: SigGen
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      # A downstream project must get the interface target, the include path
+      # and both transitive dependencies -- and must not inherit SigGen's own
+      # tests, tool or example.
+      - name: Build a downstream consumer
+        run: |
+          cp -r SigGen/test/consumer consumer
+          cmake -S consumer -B consumer/build -G Ninja \
+            -DSIGGEN_SOURCE_DIR="$PWD/SigGen"
+          cmake --build consumer/build
+          ./consumer/build/consumer
+          test ! -e consumer/build/siggen
+          test ! -e consumer/build/test/siggen_tests

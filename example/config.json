@@ -1,0 +1,40 @@
+{
+  "//": "A worked SigGen configuration. Any numeric field may be an algebraic",
+  "//expressions": "expression over the document's own keys, prefixed with $.",
+
+  "sample_rate": 2000,
+  "seed": 20260909,
+
+  "f0": 50,
+  "harmonic_level": 0.25,
+
+  "signal": {
+    "type": "composite",
+    "op": "sum",
+    "components": [
+      {
+        "type": "sine",
+        "frequency": "$f0",
+        "amplitude": 1.0,
+        "snr_db": 45
+      },
+      {
+        "type": "sine",
+        "frequency": "$3 * f0",
+        "amplitude": "$harmonic_level",
+        "noiseless": true
+      },
+      {
+        "type": "square",
+        "frequency": "$f0 / 10",
+        "amplitude": 0.1,
+        "duty": 0.2,
+        "noiseless": true
+      },
+      {
+        "type": "brown_noise",
+        "sigma": 0.05
+      }
+    ]
+  }
+}
