@@ -5,6 +5,8 @@
 [![Header-only](https://img.shields.io/badge/header--only-yes-brightgreen.svg)](include/siggen.hpp)
 [![CI](https://github.com/pbosetti/SigGen/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pbosetti/SigGen/actions/workflows/ci.yml)
 
+![SigGen](SigGen.jpg)
+
 A small, header-only **C++20** library that synthesises fake signals for
 testing: periodic waveforms, coloured noise, ARIMA processes and user-supplied
 tables, alone or composed. Signals can be described in code or in a JSON
