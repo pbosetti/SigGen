@@ -93,13 +93,32 @@ jobs:
 
       # A downstream project must get the interface target, the include path
       # and both transitive dependencies -- and must not inherit SigGen's own
-      # tests, tool or example.
-      - name: Build a downstream consumer
+      # tests, tool or example. SigGen's targets land under _deps/siggen-build,
+      # which is where their absence has to be checked.
+      - name: Build a plain downstream consumer
         run: |
           cp -r SigGen/test/consumer consumer
           cmake -S consumer -B consumer/build -G Ninja \
             -DSIGGEN_SOURCE_DIR="$PWD/SigGen"
           cmake --build consumer/build
           ./consumer/build/consumer
-          test ! -e consumer/build/siggen
-          test ! -e consumer/build/test/siggen_tests
+          test ! -e consumer/build/_deps/siggen-build/siggen
+          test ! -e consumer/build/_deps/siggen-build/test/siggen_tests
+          test ! -e consumer/build/_deps/siggen-build/siggen_example
+
+      # A consumer that already provides nlohmann_json and cxxopts must have
+      # them reused, not duplicated. The project asserts the adopted version at
+      # configure time; the checks here confirm that only one copy of each was
+      # ever downloaded, and that SigGen's own tool builds against them.
+      - name: Build a consumer that shares its dependencies
+        run: |
+          cp -r SigGen/test/consumer-shared shared
+          cmake -S shared -B shared/build -G Ninja \
+            -DSIGGEN_SOURCE_DIR="$PWD/SigGen" 2>&1 | tee shared/configure.log
+          grep -q 'using nlohmann_json::nlohmann_json already provided' shared/configure.log
+          grep -q 'using cxxopts::cxxopts already provided' shared/configure.log
+          cmake --build shared/build
+          ./shared/build/consumer_shared
+          ./shared/build/_deps/siggen-build/siggen --type sine --frequency 5 -n 20 -f csv
+          test "$(ls -d shared/build/_deps/nlohmann_json-src | wc -l)" -eq 1
+          test "$(ls -d shared/build/_deps/cxxopts-src | wc -l)" -eq 1

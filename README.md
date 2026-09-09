@@ -3,6 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Header-only](https://img.shields.io/badge/header--only-yes-brightgreen.svg)](include/siggen.hpp)
+[![CI](https://github.com/pbosetti/SigGen/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pbosetti/SigGen/actions/workflows/ci.yml)
 
 A small, header-only **C++20** library that synthesises fake signals for
 testing: periodic waveforms, coloured noise, ARIMA processes and user-supplied
@@ -33,6 +34,7 @@ is not what a real acquisition chain ever delivers.
 - <a href="#features">Features</a>
 - <a href="#requirements">Requirements</a>
 - <a href="#integration">Integration</a>
+- <a href="#dependencies-and-reuse">Dependencies and reuse</a>
 - <a href="#quick-start">Quick start</a>
 - <a href="#the-signal-model">The signal model</a>
 - <a href="#signal-types">Signal types</a>
@@ -100,6 +102,62 @@ under `<siggen/>` except `config.hpp` is dependency-free:
 ```cpp
 #include <siggen/periodic.hpp>   // no JSON, no Expressionist
 ```
+
+## Dependencies and reuse
+
+SigGen needs `nlohmann_json` and `Expressionist`, plus `cxxopts` for the tool
+and `doctest` for the tests. A project consuming SigGen is very likely to use
+some of the same libraries, and must not end up with two copies of any of them:
+duplicated sources at best, and a hard configure error at worst, since
+nlohmann/json defines `nlohmann_json::nlohmann_json` unconditionally and would
+collide with a copy already in scope.
+
+**SigGen adopts whatever the enclosing project has already provided, however it
+was provided, and fetches only what is genuinely missing.** All of these work,
+and all leave exactly one copy:
+
+```cmake
+# The consumer fetches its own pin. FetchContent honours the first declaration
+# of a name, so this version wins and SigGen uses it.
+FetchContent_Declare(nlohmann_json URL .../v3.11.3/json.tar.xz)
+FetchContent_MakeAvailable(nlohmann_json)
+FetchContent_MakeAvailable(SigGen)
+```
+
+```cmake
+# The consumer loads an installed copy. There is a target but no declaration
+# for FetchContent to defer to, so SigGen adopts the target directly.
+find_package(nlohmann_json REQUIRED)
+FetchContent_MakeAvailable(SigGen)
+```
+
+```cmake
+# The consumer vendors its own. Same again.
+add_subdirectory(external/json)
+FetchContent_MakeAvailable(SigGen)
+```
+
+Adoption is recorded as a FetchContent population, so a *nested* project asking
+for the same dependency leaves it alone too — which matters here, because
+Expressionist declares `nlohmann_json` itself.
+
+The configure output says which way each dependency went:
+
+```
+-- SigGen: using nlohmann_json::nlohmann_json already provided by the enclosing project
+-- SigGen: providing Expressionist via FetchContent
+-- SigGen: using cxxopts::cxxopts already provided by the enclosing project
+```
+
+Adoption is by target name — `nlohmann_json::nlohmann_json`,
+`Expressionist::Expressionist`, `cxxopts::cxxopts`, `doctest::doctest` — and
+SigGen takes what it is given without checking the version, so a consumer
+pinning something much older than the versions below is on its own. SigGen's
+own pins apply only when nothing else has claimed the name.
+
+Both arrangements are covered by [test/consumer/](test/consumer) and
+[test/consumer-shared/](test/consumer-shared), which the CI builds on every
+push.
 
 ## Quick start
 
@@ -464,14 +522,16 @@ ctest --test-dir build --output-on-failure
 ./build/siggen_example
 ```
 
-| Option                  | Default | Effect                          |
-|-------------------------|---------|---------------------------------|
-| `SIGGEN_BUILD_TESTS`    | `ON`    | Build the doctest suite.        |
-| `SIGGEN_BUILD_TOOL`     | `ON`    | Build the `siggen` executable.  |
-| `SIGGEN_BUILD_EXAMPLES` | `ON`    | Build the example program.      |
+| Option                  | Default        | Effect                          |
+|-------------------------|----------------|---------------------------------|
+| `SIGGEN_BUILD_TESTS`    | top-level only | Build the doctest suite.        |
+| `SIGGEN_BUILD_TOOL`     | top-level only | Build the `siggen` executable.  |
+| `SIGGEN_BUILD_EXAMPLES` | top-level only | Build the example program.      |
 
-All three apply only when SigGen is the top-level project; as a subproject it
-builds nothing but the interface library.
+All three default to `ON` for a top-level build and `OFF` for a subproject, so
+a consumer gets nothing but the interface library — but it can still ask, with
+`-DSIGGEN_BUILD_TOOL=ON` or `set(SIGGEN_BUILD_TOOL ON CACHE BOOL "" FORCE)`
+before `FetchContent_MakeAvailable(SigGen)`.
 
 ## License
 
