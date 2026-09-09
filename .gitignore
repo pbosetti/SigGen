@@ -1,3 +1,6 @@
 /*build*/
 .claude
 /doc/
+CLAUDE.md
+__pycache__/
+*.pyc

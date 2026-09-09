@@ -44,6 +44,21 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The Python wrapper's tests only register when pytest is importable;
+      # numpy is optional for the wrapper, so install it to exercise the fast
+      # path here and let the no-numpy fallback be covered by its skips.
+      - name: Install the Python test dependencies
+        run: python -m pip install --upgrade pytest numpy
+
+      # SIGGEN_BUILD_PYTHON implies SIGGEN_BUILD_C_API, so this covers the
+      # C ABI, its C-compiled smoke test and the ctypes wrapper on all three
+      # platforms -- where the shared-library differences actually bite.
       - name: Configure
         env:
           CC: ${{ matrix.cc }}
@@ -54,6 +69,9 @@ jobs:
           -DSIGGEN_BUILD_TESTS=ON
           -DSIGGEN_BUILD_TOOL=ON
           -DSIGGEN_BUILD_EXAMPLES=ON
+          -DSIGGEN_BUILD_PYTHON=ON
+          -DPython3_EXECUTABLE=${{ steps.python.outputs.python-path }}
+          -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/stage
 
       - name: Build
         run: cmake --build build
@@ -78,6 +96,15 @@ jobs:
       - name: Run the example
         if: runner.os != 'Windows'
         run: ./build/siggen_example
+
+      # The wrapper finds the shared library next to its own __init__.py, so
+      # importing it from an unrelated directory with no environment set is
+      # what proves the install layout works.
+      - name: Install and import the Python wrapper
+        run: |
+          cmake --install build
+          cd "${{ runner.temp }}"
+          python -c "import siggen; s = siggen.Signal({'type':'sine','frequency':5}, sample_rate=100, seed=1); print(siggen.version(), s.type, len(s.take(100)))"
 
   consumability:
     name: FetchContent consumability

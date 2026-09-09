@@ -44,6 +44,7 @@ is not what a real acquisition chain ever delivers.
 - <a href="#plotting">Plotting</a>
 - <a href="#command-line-tool">Command-line tool</a>
 - <a href="#reproducibility">Reproducibility</a>
+- <a href="#c-abi-and-python-interface">C ABI and Python interface</a>
 - <a href="#api-summary">API summary</a>
 - <a href="#building-and-testing">Building and testing</a>
 - <a href="#license">License</a>
@@ -488,9 +489,81 @@ and its normals from the polar Box-Muller transform. A given seed therefore
 produces **the same samples on every platform**, which the test suite pins down
 with golden values.
 
+Those same golden values are asserted from both sides of the FFI boundary --
+[test/test_golden.cpp](test/test_golden.cpp) and
+[test/python/test_c_api.py](test/python/test_c_api.py) carry the same literals
+-- so a stream pulled through the C ABI or the Python wrapper is bit for bit
+the stream the C++ API produces.
+
 Reseeding implies a reset: pink noise, brown noise and ARIMA warm their state
 up from the random stream, and keeping that state across a reseed would leave
 it derived from the old seed.
+
+## C ABI and Python interface
+
+For use from outside C++, an optional `extern "C"` layer (`siggen_c.h` /
+`libsiggen_c`) exposes the library through an opaque handle, so it is
+consumable from any language with a C FFI. A `ctypes`-based Python package
+wraps it.
+
+Both are off by default, and the C++ library itself stays header-only:
+
+```sh
+cmake -Bbuild -GNinja -DSIGGEN_BUILD_PYTHON=ON
+cmake --build build
+cmake --install build
+```
+
+`SIGGEN_BUILD_PYTHON` implies `SIGGEN_BUILD_C_API` and, on install, copies
+`libsiggen_c` and the `siggen` Python package into `Python3_SITELIB` — the
+site-packages of whichever `python3` is first on `PATH`, so it lands in an
+active virtualenv automatically. `import siggen` then just works, with no
+`PYTHONPATH` or `LD_LIBRARY_PATH` setup.
+
+A signal is described by the same JSON document the C++ `from_json()` and the
+`siggen` tool accept, so every waveform, noise colour, ARIMA process, table and
+composite is reachable through the one constructor — including the algebraic
+expressions:
+
+```python
+import siggen
+
+with siggen.Signal({"type": "sine", "frequency": 50, "snr_db": 25},
+                   sample_rate=1000, seed=7) as s:
+    samples = s.take(1000)          # numpy array, or a list without numpy
+    print(s.type, s.rms, s.snr_db)
+    print(s.plot(200, width=70))    # braille, as on the command line
+```
+
+`take()` fills a buffer on the C side and hands it back without a copy; pass
+`out=` to write into a numpy array you already own. numpy is optional — without
+it `take()` returns a plain list and everything else is unchanged.
+
+**Generate in bulk.** `next()` exists, but one FFI call per sample costs far
+more than generating the sample does — through ctypes, on the order of a
+hundred times more. Reach for `take(n)` and let the loop run on the C side.
+
+Unlike the C++ class, a handle is not thread-safe: a signal carries its stream
+position, so one handle belongs to one thread at a time.
+
+Errors surface as `SigGenError`, carrying the same diagnostic text the C++ API
+produces:
+
+```python
+>>> siggen.Signal({"type": "no_such_signal"})
+SigGenError: In '/type': unknown signal type 'no_such_signal'
+>>> siggen.Signal({"type": "square", "frequency": 1, "duty": 5})
+SigGenError: duty must lie in (0, 1), got 5.000000
+```
+
+To build just the shared library and header for a non-Python FFI consumer, use
+`-DSIGGEN_BUILD_C_API=ON` instead. If you would rather point the wrapper at a
+shared object of your own — a build-tree artefact, a custom install location —
+set `SIGGEN_C_LIBRARY` to its path; it takes precedence over the
+next-to-`__init__.py` lookup and the system library search.
+
+The streams reached through the C ABI are the same ones the C++ API produces,
+bit for bit; see <a href="#reproducibility">Reproducibility</a>.
 
 ## API summary
 
@@ -527,6 +600,8 @@ ctest --test-dir build --output-on-failure
 | `SIGGEN_BUILD_TESTS`    | top-level only | Build the doctest suite.        |
 | `SIGGEN_BUILD_TOOL`     | top-level only | Build the `siggen` executable.  |
 | `SIGGEN_BUILD_EXAMPLES` | top-level only | Build the example program.      |
+| `SIGGEN_BUILD_C_API`    | `OFF`          | Build the `siggen_c` shared library. |
+| `SIGGEN_BUILD_PYTHON`   | `OFF`          | Build and install the Python wrapper (implies `SIGGEN_BUILD_C_API`). |
 
 All three default to `ON` for a top-level build and `OFF` for a subproject, so
 a consumer gets nothing but the interface library — but it can still ask, with

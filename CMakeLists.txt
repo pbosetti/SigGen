@@ -120,6 +120,60 @@ if(SIGGEN_BUILD_TOOL)
     SIGGEN_VERSION="${PROJECT_VERSION}")
 endif()
 
+# --- Optional C ABI and Python wrapper ------------------------------------
+# Both are off by default even for a top-level build: they add the project's
+# only compiled artefact, and the C++ library itself stays header-only.
+option(SIGGEN_BUILD_C_API
+  "Build the siggen_c shared library (plain C ABI)" OFF)
+option(SIGGEN_BUILD_PYTHON
+  "Build and install the Python wrapper (implies SIGGEN_BUILD_C_API)" OFF)
+
+if(SIGGEN_BUILD_PYTHON)
+  set(SIGGEN_BUILD_C_API ON)
+endif()
+
+if(SIGGEN_BUILD_C_API)
+  include(GNUInstallDirs)
+
+  add_library(siggen_c SHARED src/siggen_c.cpp)
+  add_library(SigGen::SigGen_C ALIAS siggen_c)
+  target_include_directories(siggen_c PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(siggen_c PRIVATE siggen)
+  target_compile_definitions(siggen_c PRIVATE
+    SIGGEN_C_BUILDING
+    SIGGEN_VERSION="${PROJECT_VERSION}")
+  # Nothing but the extern "C" entry points should be visible: the C++ library
+  # is header-only, so without this every inlined template in it would be
+  # exported from the shared object as well.
+  set_target_properties(siggen_c PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR})
+
+  install(TARGETS siggen_c
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  install(FILES include/siggen_c.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+endif()
+
+if(SIGGEN_BUILD_PYTHON)
+  # The interpreter alone resolves Python3_SITELIB, and it honours an active
+  # virtualenv, so the wrapper lands wherever `python3` on PATH would import
+  # from -- no PYTHONPATH or LD_LIBRARY_PATH setup for the user.
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+  install(FILES python/siggen/__init__.py
+    DESTINATION ${Python3_SITELIB}/siggen)
+  install(TARGETS siggen_c
+    LIBRARY DESTINATION ${Python3_SITELIB}/siggen
+    RUNTIME DESTINATION ${Python3_SITELIB}/siggen)
+endif()
+
 if(SIGGEN_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)
