@@ -60,7 +60,25 @@ if(SIGGEN_BUILD_C_API)
   set_target_properties(siggen_c_smoke PROPERTIES C_STANDARD 17
                                                   C_STANDARD_REQUIRED ON)
   target_link_libraries(siggen_c_smoke PRIVATE siggen_c)
+
+  # Windows has no RPATH. On ELF and Mach-O the linker records where to find
+  # libsiggen_c at run time, but the Windows loader searches only the
+  # executable's own directory, the system directories and PATH -- and this
+  # executable is built into test/ while the library is built one level up. The
+  # DLL therefore has to sit beside it, or the process dies before main() with
+  # a loader error, which is reported as a crash locally and can wedge a CI
+  # runner behind an error dialog.
+  if(WIN32)
+    add_custom_command(TARGET siggen_c_smoke POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "$<TARGET_FILE:siggen_c>" "$<TARGET_FILE_DIR:siggen_c_smoke>"
+      COMMENT "Placing siggen_c.dll beside the C ABI test")
+  endif()
+
   add_test(NAME c_api_smoke COMMAND siggen_c_smoke)
+  # A test that cannot start must fail rather than hang: without a bound, the
+  # loader error above stalled the whole job instead of just this test.
+  set_tests_properties(c_api_smoke PROPERTIES TIMEOUT 120)
 endif()
 
 # --- Python wrapper tests -------------------------------------------------
@@ -75,7 +93,8 @@ if(SIGGEN_BUILD_PYTHON)
     # Point the wrapper at the freshly built library rather than an installed
     # one, so the tests exercise the working tree.
     set_tests_properties(python_c_api_tests PROPERTIES
-      ENVIRONMENT "SIGGEN_C_LIBRARY=$<TARGET_FILE:siggen_c>;PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../python")
+      ENVIRONMENT "SIGGEN_C_LIBRARY=$<TARGET_FILE:siggen_c>;PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../python"
+      TIMEOUT 300)
   else()
     message(STATUS "pytest not found for ${Python3_EXECUTABLE}; "
                    "skipping the Python wrapper tests")
