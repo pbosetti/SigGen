@@ -11,6 +11,8 @@
 #include <cxxopts.hpp>
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -67,14 +69,34 @@ nlohmann::json spec_from_flags(const cxxopts::ParseResult &options) {
   return spec;
 }
 
+/// The shortest decimal form that reads back as the very same double.
+///
+/// Timestamps need this. A fixed ten significant digits is ample for a time
+/// measured from the start of a stream, but epoch-anchored output counts from
+/// the Unix epoch, where ten digits do not even reach the decimal point: every
+/// row of a millisecond-sampled signal would print as the same whole second.
+/// Widening the field unconditionally would instead turn a plain "0.001" into
+/// "0.0010000000000000000", so the precision is raised only until the value
+/// survives the round trip. std::to_chars would do this directly, but its
+/// floating-point overloads are still missing from libc++.
+std::string shortest_round_trip(double value) {
+  char buffer[64];
+  for (int precision = 6; precision < 17; ++precision) {
+    std::snprintf(buffer, sizeof(buffer), "%.*g", precision, value);
+    if (std::strtod(buffer, nullptr) == value)
+      return buffer;
+  }
+  std::snprintf(buffer, sizeof(buffer), "%.17g", value);
+  return buffer;
+}
+
 void write_delimited(std::ostream &out,
                      const std::vector<std::pair<double, double>> &series,
                      char separator) {
   out << "t" << separator << "y" << '\n';
   char buffer[64];
   for (const auto &[t, y] : series) {
-    std::snprintf(buffer, sizeof(buffer), "%.10g", t);
-    out << buffer << separator;
+    out << shortest_round_trip(t) << separator;
     std::snprintf(buffer, sizeof(buffer), "%.10g", y);
     out << buffer << '\n';
   }
@@ -132,7 +154,16 @@ int main(int argc, char **argv) {
           cxxopts::value<std::size_t>())
       ("d,duration", "Duration in seconds, as an alternative to --samples",
           cxxopts::value<double>())
-      ("s,seed", "Seed of the random stream", cxxopts::value<std::uint64_t>());
+      ("s,seed", "Seed of the random stream", cxxopts::value<std::uint64_t>())
+      ("epoch", "Instant that index 0 belongs to, in seconds since the Unix "
+                "epoch; with --at or --now, two runs sharing it line up",
+          cxxopts::value<double>())
+      ("at", "Generate from this absolute sample index instead of from the "
+             "start of the stream",
+          cxxopts::value<std::uint64_t>())
+      ("now", "Generate from the index belonging to the current wall-clock "
+              "instant",
+          cxxopts::value<bool>()->default_value("false"));
 
   options.add_options("Output")
       ("f,format", "Output format: csv, tsv or json",
@@ -194,8 +225,15 @@ int main(int argc, char **argv) {
     // Command-line sampling flags override whatever the document asked for.
     if (parsed.count("rate") > 0)
       signal->set_sample_rate(parsed["rate"].as<double>());
+    if (parsed.count("epoch") > 0)
+      signal->set_epoch(parsed["epoch"].as<double>());
     if (parsed.count("seed") > 0)
       signal->set_seed(parsed["seed"].as<std::uint64_t>());
+
+    if (parsed.count("at") > 0 && parsed["now"].as<bool>()) {
+      std::cerr << "siggen: --at and --now are alternatives\n";
+      return 2;
+    }
 
     std::size_t count = 1000;
     if (parsed.count("samples") > 0) {
@@ -209,7 +247,23 @@ int main(int argc, char **argv) {
       count = static_cast<std::size_t>(seconds * signal->sample_rate());
     }
 
-    const auto series = signal->take_series(count);
+    // Addressed generation reads the samples belonging to absolute indices,
+    // so two runs -- here, or on another machine with a synchronised clock --
+    // that share the epoch, the rate and the seed produce identical output
+    // however far apart they were started. Sequential generation, the default,
+    // simply starts wherever it is asked to.
+    const bool addressed = parsed.count("at") > 0 || parsed["now"].as<bool>();
+    if (addressed && !signal->is_addressable()) {
+      std::cerr << "siggen: a '" << signal->type()
+                << "' signal cannot be addressed by index\n";
+      return 1;
+    }
+    const auto series =
+        addressed ? signal->at_range(parsed["now"].as<bool>()
+                                         ? signal->index_at(SigGen::unix_now())
+                                         : parsed["at"].as<std::uint64_t>(),
+                                     count)
+                  : signal->take_series(count);
 
     std::ofstream file;
     if (parsed.count("output") > 0) {

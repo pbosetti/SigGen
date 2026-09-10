@@ -299,3 +299,98 @@ def test_take_returns_a_numpy_array_when_numpy_is_present():
 
     with siggen.Signal({"type": "sine", "frequency": 5}) as signal:
         assert isinstance(signal.take(8), np.ndarray)
+
+
+# --- epoch anchoring ------------------------------------------------------
+
+EPOCH = 1767225600.0  # 2026-01-01T00:00:00Z
+ALIGNED = {
+    "sample_rate": 1000,
+    "seed": 42,
+    "signal": {
+        "type": "composite",
+        "op": "sum",
+        "components": [
+            {"type": "sine", "frequency": 50, "snr_db": 30},
+            {"type": "pink_noise", "sigma": 0.05},
+            {"type": "brown_noise", "sigma": 0.02},
+        ],
+    },
+}
+
+
+def test_index_and_time_invert_each_other():
+    with siggen.Signal(ALIGNED, epoch=EPOCH) as s:
+        assert s.epoch == pytest.approx(EPOCH)
+        assert s.index_at(EPOCH) == 0
+        assert s.index_at(EPOCH + 1.0) == 1000
+        assert s.time_at(1000) == pytest.approx(EPOCH + 1.0)
+        # A jittery caller lands on the nearest index rather than drifting.
+        assert s.index_at(EPOCH + 5.0 + 0.0004) == 5000
+        assert s.index_at(EPOCH + 5.0 - 0.0004) == 5000
+
+
+def test_an_instant_before_the_epoch_is_refused():
+    with siggen.Signal(ALIGNED, epoch=EPOCH) as s:
+        with pytest.raises(siggen.SigGenError):
+            s.index_at(EPOCH - 1.0)
+
+
+def test_two_signals_started_apart_agree_at_the_same_index():
+    # The whole point: one has been running, the other has generated nothing.
+    with siggen.Signal(ALIGNED, epoch=EPOCH) as early, siggen.Signal(
+        ALIGNED, epoch=EPOCH
+    ) as late:
+        assert early.is_addressable
+        early.take(12345)
+        index = early.index_at(EPOCH + 3 * 86400 + 7.0)
+        assert list(early.values_at(index, 200)) == list(late.values_at(index, 200))
+
+
+def test_a_block_and_single_samples_agree_exactly():
+    with siggen.Signal(ALIGNED, epoch=EPOCH) as a, siggen.Signal(
+        ALIGNED, epoch=EPOCH
+    ) as b:
+        first = 5_000_000_000
+        block = list(a.values_at(first, 32))
+        assert [b.at(first + i) for i in range(32)] == block
+
+
+def test_addressing_leaves_the_sequential_stream_alone():
+    with siggen.Signal({"type": "pink_noise"}, seed=9) as s:
+        expected = list(s.take(16))
+        s.reset()
+        interleaved = []
+        for i in range(16):
+            s.at(1_000_000 + i)
+            interleaved.append(s.next())
+        assert interleaved == expected
+
+
+def test_integration_cannot_be_addressed():
+    with siggen.Signal({"type": "arima", "ar": [0.6], "d": 1}) as walk:
+        assert not walk.is_addressable
+        with pytest.raises(siggen.SigGenError) as caught:
+            walk.at(10)
+        assert "cumulative sum" in str(caught.value)
+
+
+def test_epoch_travels_in_the_document():
+    with siggen.Signal({"epoch": EPOCH, "signal": {"type": "sine", "frequency": 1}}) as s:
+        assert s.epoch == pytest.approx(EPOCH)
+
+
+def test_unix_now_is_a_plausible_wall_clock():
+    import time
+
+    assert siggen.unix_now() == pytest.approx(time.time(), abs=5.0)
+
+
+@pytest.mark.skipif(not siggen.HAVE_NUMPY, reason="numpy is not installed")
+def test_values_at_fills_a_caller_supplied_array():
+    import numpy as np
+
+    with siggen.Signal(ALIGNED, epoch=EPOCH) as s:
+        buffer = np.zeros(64, dtype=np.float64)
+        assert s.values_at(1000, 64, out=buffer) is buffer
+        assert np.allclose(buffer, s.values_at(1000, 64))

@@ -8,6 +8,13 @@
 // are shaped by IIR filters whose steady-state variance is computed in closed
 // form at construction, which is what lets `sigma` mean the same thing for
 // every colour instead of being an arbitrary pre-filter gain.
+//
+// All three can also be addressed by absolute index. White noise trivially so,
+// its samples being independent. Pink and brown are recursive, but they forget
+// exponentially: the state at an index is fixed, to well within rounding, by a
+// bounded stretch of innovations before it. Since indexed innovations are
+// random access, replaying that stretch reconstructs the filter at any index
+// for a cost that does not grow with the index.
 
 #pragma once
 
@@ -19,6 +26,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace SigGen {
 
@@ -36,8 +44,15 @@ public:
 
   double rms() const override { return std::abs(_sigma); }
 
+  bool is_addressable() const override { return true; }
+
 protected:
   double sample() override { return _sigma * rng().gaussian(); }
+
+  // Independent samples, so there is no history to rebuild.
+  double sample_at(std::uint64_t index) const override {
+    return _sigma * rng().gaussian_at(index);
+  }
 
 private:
   double _sigma;
@@ -76,13 +91,54 @@ public:
     // running a few of those discards the transient, so the very first sample
     // already has the steady-state variance.
     for (std::size_t i = 0; i < warmup_samples; ++i)
-      filter(rng().gaussian());
+      filter_step(_state, _delayed, rng().gaussian());
   }
 
+  bool is_addressable() const override { return true; }
+
 protected:
-  double sample() override { return _gain * filter(rng().gaussian()); }
+  double sample() override {
+    return _gain * filter_step(_state, _delayed, rng().gaussian());
+  }
+
+  /// Rebuilds the filter from a bounded run of innovations ending at `index`.
+  ///
+  /// The answer matches a replay from index zero to within double rounding, at
+  /// a cost that does not grow with the index -- but that cost is a run of
+  /// history_for(0.99886) innovations, tens of thousands of them, so reach for
+  /// values_at() rather than this whenever more than one sample is wanted.
+  double sample_at(std::uint64_t index) const override {
+    return sample_at_range(index, 1).front();
+  }
+
+  /// Rebuilds once, then steps -- so a block costs one reconstruction rather
+  /// than one per sample.
+  std::vector<double> sample_at_range(std::uint64_t first,
+                                      std::size_t count) const override {
+    std::array<double, 6> state{};
+    double delay_state = 0.0;
+    const std::uint64_t history = reconstruction_samples();
+    const std::uint64_t start = first > history ? first - history : 0;
+    for (std::uint64_t i = start; i < first; ++i)
+      filter_step(state, delay_state, rng().gaussian_at(i));
+
+    std::vector<double> out;
+    out.reserve(count);
+    for (std::size_t k = 0; k < count; ++k)
+      out.push_back(_gain * filter_step(state, delay_state,
+                                        rng().gaussian_at(first + k)));
+    return out;
+  }
 
 private:
+  /// History needed to rebuild the state, set by the slowest section.
+  static std::uint64_t reconstruction_samples() {
+    double slowest = 0.0;
+    for (double p : poles)
+      slowest = std::max(slowest, std::abs(p));
+    return history_for(slowest);
+  }
+
   /// Pole of each one-pole section.
   static constexpr std::array<double, 6> poles = {0.99886, 0.99332, 0.96900,
                                                   0.86650, 0.55000, -0.7616};
@@ -95,14 +151,17 @@ private:
   static constexpr double delayed = 0.115926;
   static constexpr std::size_t warmup_samples = 5000;
 
-  double filter(double white) {
+  /// One filter step over caller-supplied state, so that the same arithmetic
+  /// serves the running stream and a reconstruction from local variables.
+  static double filter_step(std::array<double, 6> &state, double &delay_state,
+                            double white) {
     double sum = 0.0;
     for (std::size_t i = 0; i < poles.size(); ++i) {
-      _state[i] = poles[i] * _state[i] + gains[i] * white;
-      sum += _state[i];
+      state[i] = poles[i] * state[i] + gains[i] * white;
+      sum += state[i];
     }
-    sum += _delayed + direct * white;
-    _delayed = delayed * white;
+    sum += delay_state + direct * white;
+    delay_state = delayed * white;
     return sum;
   }
 
@@ -176,11 +235,11 @@ public:
     _state = 0.0;
     // Starting from zero, the walk needs a few time constants to reach its
     // steady-state spread; skip them so sigma holds from the first sample.
-    const std::size_t warmup =
-        static_cast<std::size_t>(5.0 / std::max(1.0 - _leak, 1e-6));
-    for (std::size_t i = 0; i < warmup; ++i)
+    for (std::uint64_t i = 0; i < warmup_samples(); ++i)
       _state = _leak * _state + _drive * rng().gaussian();
   }
+
+  bool is_addressable() const override { return true; }
 
 protected:
   double sample() override {
@@ -188,7 +247,41 @@ protected:
     return _state;
   }
 
+  /// Rebuilds the walk from a bounded run of innovations ending at `index`.
+  /// The leak is what makes this possible at all: a true integrator would
+  /// remember every innovation ever drawn, whereas this one forgets on a
+  /// timescale of 1/(1 - leak) samples. A leak set very close to 1 therefore
+  /// buys longer memory at the price of a longer reconstruction.
+  double sample_at(std::uint64_t index) const override {
+    return sample_at_range(index, 1).front();
+  }
+
+  /// Rebuilds once, then steps.
+  std::vector<double> sample_at_range(std::uint64_t first,
+                                      std::size_t count) const override {
+    const std::uint64_t history = history_for(_leak);
+    const std::uint64_t start = first > history ? first - history : 0;
+    double state = 0.0;
+    for (std::uint64_t i = start; i < first; ++i)
+      state = _leak * state + _drive * rng().gaussian_at(i);
+
+    std::vector<double> out;
+    out.reserve(count);
+    for (std::size_t k = 0; k < count; ++k) {
+      state = _leak * state + _drive * rng().gaussian_at(first + k);
+      out.push_back(state);
+    }
+    return out;
+  }
+
 private:
+  /// Innovations needed to reach the steady state, five time constants of the
+  /// leak. The floor keeps a leak of exactly 1 -- which reset() would
+  /// otherwise turn into an endless loop -- to a finite, if long, run.
+  std::uint64_t warmup_samples() const {
+    return static_cast<std::uint64_t>(5.0 / std::max(1.0 - _leak, 1e-6));
+  }
+
   double _sigma;
   double _leak = 0.99;
   // Input scaling that makes the steady-state variance of the AR(1) recursion,

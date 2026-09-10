@@ -22,6 +22,7 @@ __all__ = [
     "Signal",
     "SigGenError",
     "plot",
+    "unix_now",
     "version",
     "HAVE_NUMPY",
 ]
@@ -179,6 +180,39 @@ _lib.siggen_plot_values.argtypes = [
     _PlotOptionsP,
 ]
 
+_lib.siggen_set_epoch.restype = ctypes.c_int
+_lib.siggen_set_epoch.argtypes = [ctypes.c_void_p, ctypes.c_double]
+
+_lib.siggen_epoch.restype = ctypes.c_double
+_lib.siggen_epoch.argtypes = [ctypes.c_void_p]
+
+_lib.siggen_index_at.restype = ctypes.c_int
+_lib.siggen_index_at.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_double,
+    ctypes.POINTER(ctypes.c_uint64),
+]
+
+_lib.siggen_time_at.restype = ctypes.c_double
+_lib.siggen_time_at.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+
+_lib.siggen_is_addressable.restype = ctypes.c_int
+_lib.siggen_is_addressable.argtypes = [ctypes.c_void_p]
+
+_lib.siggen_at.restype = ctypes.c_int
+_lib.siggen_at.argtypes = [ctypes.c_void_p, ctypes.c_uint64, _DoubleP]
+
+_lib.siggen_values_at.restype = ctypes.c_int
+_lib.siggen_values_at.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_uint64,
+    _DoubleP,
+    ctypes.c_size_t,
+]
+
+_lib.siggen_unix_now.restype = ctypes.c_double
+_lib.siggen_unix_now.argtypes = []
+
 _lib.siggen_version.restype = ctypes.c_char_p
 _lib.siggen_version.argtypes = []
 
@@ -283,7 +317,7 @@ class Signal:
     and algebraic expressions in the parameters are evaluated on the way in.
     """
 
-    def __init__(self, config, sample_rate=None, seed=None):
+    def __init__(self, config, sample_rate=None, seed=None, epoch=None):
         text = config if isinstance(config, str) else json.dumps(config)
         error = ctypes.c_void_p()
         handle = _lib.siggen_create(text.encode("utf-8"), ctypes.byref(error))
@@ -292,11 +326,13 @@ class Signal:
         self._handle = handle
         if sample_rate is not None:
             self.sample_rate = sample_rate
+        if epoch is not None:
+            self.epoch = epoch
         if seed is not None:
             self.seed = seed
 
     @classmethod
-    def from_file(cls, path, sample_rate=None, seed=None):
+    def from_file(cls, path, sample_rate=None, seed=None, epoch=None):
         """Build a signal from a JSON file."""
         error = ctypes.c_void_p()
         handle = _lib.siggen_create_from_file(
@@ -304,14 +340,16 @@ class Signal:
         )
         if not handle:
             raise SigGenError(_take_cstr(error) or "could not read the file")
-        return cls._adopt(handle, sample_rate, seed)
+        return cls._adopt(handle, sample_rate, seed, epoch)
 
     @classmethod
-    def _adopt(cls, handle, sample_rate=None, seed=None):
+    def _adopt(cls, handle, sample_rate=None, seed=None, epoch=None):
         signal = cls.__new__(cls)
         signal._handle = handle
         if sample_rate is not None:
             signal.sample_rate = sample_rate
+        if epoch is not None:
+            signal.epoch = epoch
         if seed is not None:
             signal.seed = seed
         return signal
@@ -377,6 +415,92 @@ class Signal:
             _lib.siggen_take_series(self._handle, times_pointer, values_pointer, n)
         )
         return _finish_buffer(times), _finish_buffer(values)
+
+    def at(self, index):
+        """The sample belonging to an absolute index, measured from the epoch.
+
+        Independent of where the sequential stream has reached, so this and
+        take() may be mixed freely. Two signals built from the same description
+        return the same value here for the same index, whenever each was
+        started -- which is what puts them in phase across processes or
+        machines.
+
+        Rebuilding history makes this expensive for the filtered generators;
+        use values_at() for anything but a single sample.
+        """
+        value = ctypes.c_double()
+        self._check(
+            _lib.siggen_at(self._handle, ctypes.c_uint64(int(index)),
+                           ctypes.cast(ctypes.byref(value), _DoubleP))
+        )
+        return value.value
+
+    def values_at(self, first, count, out=None):
+        """`count` samples starting at absolute index `first`.
+
+        Prefer this to a loop over at(): the filtered generators rebuild their
+        history once for the whole block instead of once per sample, some two
+        hundred times cheaper, and the results are identical to the last bit.
+
+        Returns a numpy array when numpy is installed and a list otherwise;
+        pass `out` to fill a float64 array you already own.
+        """
+        count = int(count)
+        if count < 0:
+            raise ValueError("count must not be negative")
+        first = ctypes.c_uint64(int(first))
+        if out is not None:
+            self._check(
+                _lib.siggen_values_at(
+                    self._handle, first, _writable_pointer(out, count), count
+                )
+            )
+            return out
+        buffer, pointer = _new_buffer(count)
+        self._check(_lib.siggen_values_at(self._handle, first, pointer, count))
+        return _finish_buffer(buffer)
+
+    def index_at(self, unix_seconds):
+        """The absolute sample index belonging to a wall-clock instant.
+
+        Deriving the index from the clock rather than counting calls is what
+        keeps two machines in step: a late caller skips indices and an early one
+        repeats them, but neither drifts.
+        """
+        index = ctypes.c_uint64()
+        self._check(
+            _lib.siggen_index_at(
+                self._handle, float(unix_seconds), ctypes.byref(index)
+            )
+        )
+        return index.value
+
+    def time_at(self, index):
+        """The wall-clock instant an index belongs to, inverting index_at()."""
+        return _lib.siggen_time_at(self._handle, ctypes.c_uint64(int(index)))
+
+    @property
+    def is_addressable(self):
+        """Whether at() works for this signal.
+
+        False only where a sample depends on unboundedly much history: an ARIMA
+        process with a nonzero order of integration, or a composite containing
+        one.
+        """
+        return bool(_lib.siggen_is_addressable(self._handle))
+
+    @property
+    def epoch(self):
+        """The instant index 0 belongs to, in seconds since the Unix epoch.
+
+        Defaults to 0 -- the Unix epoch itself -- so two signals that never
+        touch it still agree.
+        """
+        return _lib.siggen_epoch(self._handle)
+
+    @epoch.setter
+    def epoch(self, value):
+        self._check(_lib.siggen_set_epoch(self._handle, float(value)))
 
     def next(self):
         """One sample. Convenient, but take() is far faster in bulk."""
@@ -480,6 +604,16 @@ def plot(y, t=None, time_step=1.0, **options):
     if not result:
         raise SigGenError("could not render the plot")
     return _take_cstr(result)
+
+
+def unix_now():
+    """Seconds since the Unix epoch, from the system clock.
+
+    The system clock, not a steady one: only wall-clock time means the same
+    thing on two machines. Feed it to Signal.index_at() to drive real-time
+    generation.
+    """
+    return _lib.siggen_unix_now()
 
 
 def version():

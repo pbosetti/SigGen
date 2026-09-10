@@ -271,6 +271,83 @@ int siggen_snr_db(const siggen_signal_t *sig, double *out_snr_db) {
   return 1;
 }
 
+int siggen_set_epoch(siggen_signal_t *sig, double unix_seconds) {
+  if (!sig)
+    return 1;
+  try {
+    sig->signal->set_epoch(unix_seconds);
+    return succeed(sig);
+  } catch (const std::exception &e) {
+    return fail(sig, e.what());
+  } catch (...) {
+    return fail(sig, "unknown error");
+  }
+}
+
+double siggen_epoch(const siggen_signal_t *sig) {
+  return sig ? sig->signal->epoch() : not_a_number;
+}
+
+int siggen_index_at(siggen_signal_t *sig, double unix_seconds,
+                    uint64_t *out_index) {
+  if (!sig)
+    return 1;
+  if (!out_index)
+    return fail(sig, "siggen_index_at: out_index must not be NULL");
+  try {
+    *out_index = sig->signal->index_at(unix_seconds);
+    return succeed(sig);
+  } catch (const std::exception &e) {
+    return fail(sig, e.what());
+  } catch (...) {
+    return fail(sig, "unknown error");
+  }
+}
+
+double siggen_time_at(const siggen_signal_t *sig, uint64_t index) {
+  return sig ? sig->signal->time_at(index) : not_a_number;
+}
+
+int siggen_is_addressable(const siggen_signal_t *sig) {
+  if (!sig)
+    return 0;
+  return sig->signal->is_addressable() ? 1 : 0;
+}
+
+int siggen_at(siggen_signal_t *sig, uint64_t index, double *out_value) {
+  if (!sig)
+    return 1;
+  if (!out_value)
+    return fail(sig, "siggen_at: out_value must not be NULL");
+  try {
+    *out_value = sig->signal->at(index);
+    return succeed(sig);
+  } catch (const std::exception &e) {
+    return fail(sig, e.what());
+  } catch (...) {
+    return fail(sig, "unknown error");
+  }
+}
+
+int siggen_values_at(siggen_signal_t *sig, uint64_t first, double *out,
+                     size_t n) {
+  if (!sig)
+    return 1;
+  if (!out)
+    return fail(sig, "siggen_values_at: out must not be NULL");
+  try {
+    const std::vector<double> values = sig->signal->values_at(first, n);
+    std::memcpy(out, values.data(), n * sizeof(double));
+    return succeed(sig);
+  } catch (const std::exception &e) {
+    return fail(sig, e.what());
+  } catch (...) {
+    return fail(sig, "unknown error");
+  }
+}
+
+double siggen_unix_now(void) { return SigGen::unix_now(); }
+
 const char *siggen_type(const siggen_signal_t *sig) {
   return sig ? sig->type.c_str() : nullptr;
 }

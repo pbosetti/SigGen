@@ -56,7 +56,30 @@ public:
     _accumulator = wrap(_phase / (2.0 * std::numbers::pi));
   }
 
+  bool is_addressable() const override { return true; }
+
 protected:
+  /// Phase at an absolute index, derived from the epoch instead of
+  /// accumulated.
+  ///
+  /// This is what makes two independently started generators agree. It gives
+  /// up the two things the accumulator buys -- a frequency change mid-stream
+  /// no longer slides the phase continuously, and the product below loses
+  /// resolution as the index grows -- but the loss is tiny: even reckoned from
+  /// the Unix epoch, a 50 Hz tone keeps its phase to a few hundred
+  /// nanoseconds, orders of magnitude finer than the clock synchronisation
+  /// that motivates addressing it in the first place.
+  double phase_at(std::uint64_t index) const {
+    const double cycles =
+        _phase / (2.0 * std::numbers::pi) +
+        _frequency * static_cast<double>(index) / sample_rate();
+    return wrap(cycles);
+  }
+
+  double sample_at(std::uint64_t index) const override {
+    return _amplitude * waveform(phase_at(index)) + _offset;
+  }
+
   Periodic(double frequency, double amplitude, double phase, double offset)
       : _frequency(frequency), _amplitude(amplitude), _phase(phase),
         _offset(offset), _accumulator(wrap(phase / (2.0 * std::numbers::pi))) {}

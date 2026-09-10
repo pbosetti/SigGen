@@ -180,6 +180,91 @@ SIGGEN_C_API int siggen_set_noiseless(siggen_signal_t *sig);
 SIGGEN_C_API int siggen_snr_db(const siggen_signal_t *sig, double *out_snr_db);
 /*! @} */
 
+/*! \name Epoch anchoring and index addressing
+ *
+ *  A signal read through siggen_take() counts from wherever the handle
+ *  happened to start, which is private to it. These calls instead address the
+ *  sample belonging to an absolute index measured from a shared epoch, so two
+ *  processes -- on one machine or on two with synchronised clocks -- that agree
+ *  on the epoch, the sampling rate and the seed agree on every sample,
+ *  whenever each of them started.
+ *
+ *  \code{.c}
+ *  siggen_set_epoch(sig, 1767225600.0);   // agreed constant, both machines
+ *  siggen_set_sample_rate(sig, 1000.0);
+ *  siggen_set_seed(sig, 42);
+ *
+ *  uint64_t index = 0;
+ *  siggen_index_at(sig, siggen_unix_now(), &index);
+ *  double block[256];
+ *  siggen_values_at(sig, index, block, 256);
+ *  \endcode
+ *  @{ */
+
+/*! Sets the instant index 0 belongs to, in seconds since the Unix epoch.
+ *  Defaults to 0 -- the Unix epoch itself -- so two handles that never touch
+ *  it still agree.
+ *  \return 0 on success, nonzero if `sig` is NULL */
+SIGGEN_C_API int siggen_set_epoch(siggen_signal_t *sig, double unix_seconds);
+
+/*! \return the epoch in seconds since the Unix epoch, or NaN if NULL */
+SIGGEN_C_API double siggen_epoch(const siggen_signal_t *sig);
+
+/*! The absolute sample index belonging to a wall-clock instant.
+ *
+ *  Deriving the index from the clock rather than counting calls is what keeps
+ *  two machines in step: a late caller skips indices and an early one repeats
+ *  them, but neither drifts, as a free-running counter on a jittery timer
+ *  would.
+ *
+ *  \param out_index set to the index on success
+ *  \return 0 on success, nonzero if `sig` or `out_index` is NULL, or if the
+ *          instant precedes the epoch (see siggen_last_error()) */
+SIGGEN_C_API int siggen_index_at(siggen_signal_t *sig, double unix_seconds,
+                                 uint64_t *out_index);
+
+/*! \return the wall-clock instant an index belongs to, inverting
+ *  siggen_index_at(), or NaN if `sig` is NULL */
+SIGGEN_C_API double siggen_time_at(const siggen_signal_t *sig, uint64_t index);
+
+/*! Whether this signal can be addressed by index at all.
+ *
+ *  True for the waveforms, white noise, tabulated signals, pink and brown
+ *  noise, a stationary ARMA and any composite of those. False only for an
+ *  ARIMA process with a nonzero order of integration -- a cumulative sum whose
+ *  value at an index depends on every innovation before it, leaving no bounded
+ *  history to rebuild -- and for composites containing one.
+ *
+ *  \return nonzero when addressable, 0 when not or when `sig` is NULL */
+SIGGEN_C_API int siggen_is_addressable(const siggen_signal_t *sig);
+
+/*! The sample belonging to an absolute index, leaving the sequential stream
+ *  untouched, so this and siggen_take() may be mixed freely.
+ *
+ *  \param out_value set to the sample on success
+ *  \return 0 on success, nonzero on failure (a NULL argument, or a signal that
+ *          cannot be addressed; see siggen_last_error()) */
+SIGGEN_C_API int siggen_at(siggen_signal_t *sig, uint64_t index,
+                           double *out_value);
+
+/*! The samples for `n` consecutive indices starting at `first`, written into
+ *  `out`, which the caller owns and which must hold at least `n` doubles.
+ *
+ *  **Prefer this to a loop over siggen_at().** The filtered generators answer
+ *  a single index by rebuilding their history, tens of thousands of
+ *  innovations for pink noise; asked for a block they rebuild once and then
+ *  step, which measures a couple of hundred times faster per sample. The
+ *  results are identical either way, to the last bit.
+ *
+ *  \return 0 on success, nonzero on failure (see siggen_last_error()) */
+SIGGEN_C_API int siggen_values_at(siggen_signal_t *sig, uint64_t first,
+                                  double *out, size_t n);
+
+/*! Seconds since the Unix epoch, from the system clock -- the only clock two
+ *  machines can agree on, a steady one having a per-boot origin. */
+SIGGEN_C_API double siggen_unix_now(void);
+/*! @} */
+
 /*! \name Introspection
  *  @{ */
 

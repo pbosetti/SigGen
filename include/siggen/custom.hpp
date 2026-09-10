@@ -149,8 +149,17 @@ public:
     return std::sqrt(integral / span());
   }
 
+  bool is_addressable() const override { return true; }
+
 protected:
   double sample() override { return value_at(time()); }
+
+  /// The table is already a function of time, so addressing it is just a
+  /// matter of converting the index -- elapsed time since the epoch, which is
+  /// what the knot times are measured against.
+  double sample_at(std::uint64_t index) const override {
+    return value_at(static_cast<double>(index) / sample_rate());
+  }
 
 private:
   /// Central-difference slopes at the knots, one-sided at the two ends. Using

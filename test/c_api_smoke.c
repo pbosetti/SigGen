@@ -199,9 +199,87 @@ static void test_series_and_plot(void) {
   siggen_destroy(sig);
 }
 
+static void test_epoch(void) {
+  const double epoch = 1767225600.0; /* 2026-01-01T00:00:00Z */
+  const char *document =
+      "{\"sample_rate\":1000,\"seed\":42,\"signal\":{"
+      " \"type\":\"composite\",\"components\":["
+      "   {\"type\":\"sine\",\"frequency\":50,\"snr_db\":30},"
+      "   {\"type\":\"pink_noise\",\"sigma\":0.05}]}}";
+
+  char *error = NULL;
+  siggen_signal_t *early = siggen_create(document, &error);
+  siggen_signal_t *late = siggen_create(document, &error);
+  CHECK(early != NULL && late != NULL, "both handles must be built");
+  if (!early || !late) {
+    siggen_destroy(early);
+    siggen_destroy(late);
+    return;
+  }
+  CHECK(siggen_set_epoch(early, epoch) == 0, "the epoch must be settable");
+  CHECK(siggen_set_epoch(late, epoch) == 0, "the epoch must be settable");
+  CHECK(CLOSE(siggen_epoch(early), epoch), "the epoch must round-trip");
+  CHECK(siggen_is_addressable(early), "this composite must be addressable");
+
+  uint64_t index = 0;
+  CHECK(siggen_index_at(early, epoch + 1.0, &index) == 0, "index_at succeeds");
+  CHECK(index == 1000u, "one second at 1 kHz is index 1000");
+  CHECK(CLOSE(siggen_time_at(early, 1000), epoch + 1.0), "time_at inverts it");
+
+  /* An instant before the epoch has no index. */
+  CHECK(siggen_index_at(early, epoch - 1.0, &index) != 0,
+        "an instant before the epoch must be refused");
+  CHECK(strlen(siggen_last_error(early)) > 0, "the refusal must be explained");
+
+  /* One handle has been streaming; the other has produced nothing. They must
+     still agree, which is the entire point of addressing by index. */
+  double warmup[500];
+  siggen_take(early, warmup, 500);
+
+  CHECK(siggen_index_at(early, epoch + 3 * 86400.0 + 7.0, &index) == 0,
+        "a distant instant still maps to an index");
+
+  double block_a[128], block_b[128];
+  CHECK(siggen_values_at(early, index, block_a, 128) == 0, "values_at works");
+  CHECK(siggen_values_at(late, index, block_b, 128) == 0, "values_at works");
+  int mismatches = 0;
+  for (int i = 0; i < 128; ++i)
+    if (block_a[i] != block_b[i])
+      ++mismatches;
+  CHECK(mismatches == 0, "two handles must agree at the same index");
+
+  /* A single sample must match the block, or block-streaming and
+     sample-by-sample callers would drift apart. */
+  double single = 0.0;
+  CHECK(siggen_at(late, index + 7, &single) == 0, "at() works");
+  CHECK(single == block_a[7], "at() must match values_at()");
+
+  siggen_destroy(early);
+  siggen_destroy(late);
+
+  /* Integration cannot be addressed, and must say so rather than guess. */
+  error = NULL;
+  siggen_signal_t *walk = siggen_create(
+      "{\"type\":\"arima\",\"ar\":[0.6],\"d\":1,\"sigma\":1}", &error);
+  CHECK(walk != NULL, "an integrated ARIMA must still be constructible");
+  if (walk) {
+    CHECK(!siggen_is_addressable(walk), "d=1 must not be addressable");
+    double value = 0.0;
+    CHECK(siggen_at(walk, 10, &value) != 0, "at() must fail for d=1");
+    CHECK(strstr(siggen_last_error(walk), "cumulative sum") != NULL,
+          "the refusal must explain why");
+    siggen_destroy(walk);
+  }
+
+  CHECK(siggen_unix_now() > epoch, "the wall clock must be past the epoch");
+  CHECK(siggen_is_addressable(NULL) == 0, "NULL is not addressable");
+  CHECK(isnan(siggen_epoch(NULL)), "epoch of NULL must be NaN");
+}
+
 int main(void) {
   printf("siggen_c version %s\n", siggen_version());
   test_errors();
+  test_epoch();
   test_stream();
   test_noise_and_seed();
   test_snr_and_clone();

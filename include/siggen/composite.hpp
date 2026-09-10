@@ -72,6 +72,7 @@ public:
     if (!signal)
       throw SigGenException("cannot add a null component to a composite");
     signal->set_sample_rate(sample_rate());
+    signal->set_epoch(epoch());
     signal->set_seed(derived_seed(_components.size()));
     _components.push_back({std::move(signal), gain});
   }
@@ -92,6 +93,21 @@ public:
     Signal::set_sample_rate(fs);
     for (Component &c : _components)
       c.signal->set_sample_rate(fs);
+  }
+
+  void set_epoch(double unix_seconds) override {
+    Signal::set_epoch(unix_seconds);
+    for (Component &c : _components)
+      c.signal->set_epoch(unix_seconds);
+  }
+
+  /// Addressable exactly when every component is: one component that cannot be
+  /// rebuilt at an index is enough to sink the whole combination.
+  bool is_addressable() const override {
+    for (const Component &c : _components)
+      if (!c.signal->is_addressable())
+        return false;
+    return true;
   }
 
   /// Reseed the composite and give every component its own derived seed, so
@@ -130,6 +146,43 @@ public:
   }
 
 protected:
+  /// Combines the components at an absolute index, each carrying its own
+  /// intrinsic noise, mirroring what sample() does with next().
+  double sample_at(std::uint64_t index) const override {
+    if (_components.empty())
+      return 0.0;
+    if (_op == Op::SUM) {
+      double total = 0.0;
+      for (const Component &c : _components)
+        total += c.gain * c.signal->at(index);
+      return total;
+    }
+    double product = 1.0;
+    for (const Component &c : _components)
+      product *= c.gain * c.signal->at(index);
+    return product;
+  }
+
+  /// Combines the components over a block, letting each amortize its own
+  /// reconstruction rather than redoing it per sample.
+  std::vector<double> sample_at_range(std::uint64_t first,
+                                      std::size_t count) const override {
+    const double identity = _op == Op::SUM ? 0.0 : 1.0;
+    std::vector<double> out(count, _components.empty() ? 0.0 : identity);
+    if (_components.empty())
+      return out;
+    for (const Component &c : _components) {
+      const std::vector<double> values = c.signal->values_at(first, count);
+      for (std::size_t i = 0; i < count; ++i) {
+        if (_op == Op::SUM)
+          out[i] += c.gain * values[i];
+        else
+          out[i] *= c.gain * values[i];
+      }
+    }
+    return out;
+  }
+
   double sample() override {
     if (_components.empty())
       return 0.0;

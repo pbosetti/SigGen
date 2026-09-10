@@ -82,6 +82,12 @@ public:
     return std::abs(_sigma) * std::sqrt(energy);
   }
 
+  /// A stationary ARMA forgets exponentially and can be reconstructed at any
+  /// index; integration cannot. A cumulative sum's value at an index is a
+  /// function of every innovation before it, with no bounded stretch that
+  /// determines it, so a nonzero order of integration rules addressing out.
+  bool is_addressable() const override { return _d == 0; }
+
   void reset() override {
     Signal::reset();
     _past_values.assign(_ar.size(), 0.0);
@@ -105,27 +111,78 @@ protected:
     return y;
   }
 
+  /// Rebuilds a stationary ARMA from a bounded run of innovations ending at
+  /// `index`, the same warm-up reset() uses being enough to settle it.
+  double sample_at(std::uint64_t index) const override {
+    if (_d != 0)
+      throw SigGenException(
+          "an ARIMA signal integrated " + std::to_string(_d) +
+          " time(s) cannot be addressed by index: a cumulative sum depends on "
+          "every innovation before it, so there is no bounded history to "
+          "rebuild");
+
+    return sample_at_range(index, 1).front();
+  }
+
+  /// Rebuilds once, then steps.
+  std::vector<double> sample_at_range(std::uint64_t first,
+                                      std::size_t count) const override {
+    if (_d != 0)
+      return {sample_at(first)}; // rethrows with the explanation above
+
+    std::deque<double> values(_ar.size(), 0.0);
+    std::deque<double> errors(_ma.size(), 0.0);
+    const std::uint64_t history = reconstruction_samples();
+    const std::uint64_t start = first > history ? first - history : 0;
+    for (std::uint64_t i = start; i < first; ++i)
+      arma_step(values, errors, _sigma * rng().gaussian_at(i));
+
+    std::vector<double> out;
+    out.reserve(count);
+    for (std::size_t k = 0; k < count; ++k)
+      out.push_back(
+          arma_step(values, errors, _sigma * rng().gaussian_at(first + k)));
+    return out;
+  }
+
 private:
   static constexpr std::size_t warmup_samples = 1000;
 
-  /// One step of the stationary ARMA recursion.
-  double arma_step() {
-    const double innovation = _sigma * rng().gaussian();
+  /// History needed to rebuild the recursion. The sum of |phi| bounds the
+  /// spectral radius of the AR part, which is what sets how fast it forgets;
+  /// a moving-average term of order q contributes exactly q more.
+  std::uint64_t reconstruction_samples() const {
+    double radius = 0.0;
+    for (double phi : _ar)
+      radius += std::abs(phi);
+    return history_for(radius) + _ma.size();
+  }
+
+  /// One step of the stationary ARMA recursion over caller-supplied state, so
+  /// that the same arithmetic serves the running stream and a reconstruction
+  /// from local variables.
+  double arma_step(std::deque<double> &values, std::deque<double> &errors,
+                   double innovation) const {
     double value = innovation;
     for (std::size_t i = 0; i < _ar.size(); ++i)
-      value += _ar[i] * _past_values[i];
+      value += _ar[i] * values[i];
     for (std::size_t j = 0; j < _ma.size(); ++j)
-      value += _ma[j] * _past_errors[j];
+      value += _ma[j] * errors[j];
 
-    if (!_past_values.empty()) {
-      _past_values.push_front(value);
-      _past_values.pop_back();
+    if (!values.empty()) {
+      values.push_front(value);
+      values.pop_back();
     }
-    if (!_past_errors.empty()) {
-      _past_errors.push_front(innovation);
-      _past_errors.pop_back();
+    if (!errors.empty()) {
+      errors.push_front(innovation);
+      errors.pop_back();
     }
     return value;
+  }
+
+  /// The running stream's step, over the member state.
+  double arma_step() {
+    return arma_step(_past_values, _past_errors, _sigma * rng().gaussian());
   }
 
   std::vector<double> _ar;

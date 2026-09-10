@@ -46,6 +46,7 @@ is not what a real acquisition chain ever delivers.
 - <a href="#plotting">Plotting</a>
 - <a href="#command-line-tool">Command-line tool</a>
 - <a href="#reproducibility">Reproducibility</a>
+- <a href="#synchronised-generation">Synchronised generation</a>
 - <a href="#c-abi-and-python-interface">C ABI and Python interface</a>
 - <a href="#api-summary">API summary</a>
 - <a href="#building-and-testing">Building and testing</a>
@@ -73,6 +74,9 @@ is not what a real acquisition chain ever delivers.
 - Braille-art plotting in the terminal, with a plain-ASCII fallback.
 - **Reproducible across platforms**: the same seed yields bit-identical samples
   on libstdc++, libc++ and MSVC.
+- **Epoch-anchored generation**, for producing one signal on several machines at
+  once and having the outputs line up — including for the recursive generators,
+  which are rebuilt at an arbitrary index from bounded history.
 - Consumable via CMake `FetchContent`.
 
 ## Requirements
@@ -338,7 +342,9 @@ auto other  = SigGen::from_string(R"({"type": "sine", "frequency": 50})");
 ```
 
 The document is either a bare signal object (carrying `type`) or a wrapper
-holding it under `signal` alongside `sample_rate` and `seed`. It is first
+holding it under `signal` alongside `sample_rate`, `seed` and `epoch` — the
+three that several machines generating one signal together must agree on, see
+<a href="#synchronised-generation">Synchronised generation</a>. It is first
 passed through Expressionist, so **any** numeric field may be an algebraic
 expression over the document's own keys:
 
@@ -460,6 +466,9 @@ echo '{"type":"pink_noise","sigma":2}' | siggen --plot --ascii
 | `-n, --samples arg`   | Number of samples                                    | `1000`  |
 | `-d, --duration arg`  | Duration in seconds, instead of `--samples`          |         |
 | `-s, --seed arg`      | Seed of the random stream                            |         |
+| `--epoch arg`         | Instant index 0 belongs to, in Unix seconds          | `0`     |
+| `--at arg`            | Generate from this absolute sample index             |         |
+| `--now`               | Generate from the index belonging to this instant    | off     |
 | `-f, --format arg`    | `csv`, `tsv` or `json`                               | `csv`   |
 | `-o, --output arg`    | Write to a file instead of stdout                    |         |
 | `-p, --plot`          | Draw a braille plot instead of listing the samples   | off     |
@@ -500,6 +509,112 @@ the stream the C++ API produces.
 Reseeding implies a reset: pink noise, brown noise and ARIMA warm their state
 up from the random stream, and keeping that state across a reseed would leave
 it derived from the old seed.
+
+## Synchronised generation
+
+A stateful stream counts from wherever it started, which is private to it. To
+produce *one* signal on several machines at once — or in several processes
+started at different moments — the samples have to be identified by something
+both sides can compute: an absolute index measured from a **shared epoch**.
+
+```cpp
+auto signal = SigGen::from_string(document);
+signal->set_epoch(1767225600.0);          // agreed constant, every machine
+signal->set_sample_rate(1000.0);
+signal->set_seed(42);
+
+while (running) {
+  wait_for_tick();
+  const std::uint64_t index = signal->index_at(SigGen::unix_now());
+  for (double y : signal->values_at(index, block))
+    emit(y);
+}
+```
+
+Agree on the epoch, the rate and the seed — put all three in the shared JSON
+document — and two generators return the same sample for the same index,
+however far apart in time each of them was started. `at()` and `values_at()`
+leave the sequential stream alone, so they mix freely with `next()`.
+
+**Drive the index from the clock, never from a counter.** `index_at()` returns
+the index a wall-clock instant *belongs to*, so a late caller skips indices and
+an early one repeats them. Neither drifts. A free-running counter incremented
+once per timer tick accumulates every scheduling delay and walks away from the
+other machine.
+
+Use `system_clock` (which `unix_now()` reads), not `steady_clock`: only
+wall-clock time means the same thing on two machines, a steady clock's origin
+being arbitrary and per-boot. The price is that a time daemon can *step* it;
+where that matters, feed `index_at()` a clock that is slewed instead.
+
+### What can be addressed, and what it costs
+
+Not every generator can answer for an arbitrary index, and `is_addressable()`
+says which can:
+
+| | Signals | Cost of `at(n)` |
+|---|---|---|
+| Pure function of time | sine, square, triangle, sawtooth, custom | O(1) |
+| Independent samples | white noise, the intrinsic noise floor | O(1) |
+| Exponentially forgetting | pink noise, brown noise, ARMA (`d = 0`) | O(history), independent of `n` |
+| Unbounded memory | ARIMA with `d ≥ 1` | **not addressable** |
+
+The third row is the interesting one. Those generators are recursive, so there
+is no closed form — but they *forget* exponentially, which means the state at
+an index is fixed, to within double rounding, by a bounded run of innovations
+before it. Since indexed innovations are random access, replaying that run
+rebuilds the filter at any index for a cost that does not grow with the index.
+The run is sized from the slowest pole so that a rebuilt state matches one
+carried forward exactly, rather than by the usual five time constants, which
+would leave a residue of some seven parts in a thousand.
+
+Integration is the exception: a cumulative sum's value at an index depends on
+every innovation before it, with no bounded stretch that determines it, so an
+ARIMA process with `d ≥ 1` refuses rather than returning something
+plausible-looking. Its *increments* still align, so share the epoch and replay
+if that is what you need.
+
+**Ask for blocks.** `values_at(first, count)` rebuilds history once and then
+steps; a loop over `at()` rebuilds per sample. For pink noise that is a factor
+of roughly two hundred, and the results are identical to the last bit — a
+guarantee the test suite pins down, since otherwise a block-streaming device
+would drift from one sampling single indices.
+
+### From the command line
+
+Two runs sharing an epoch produce the same bytes, which is the quickest way to
+convince yourself:
+
+```sh
+echo '{"sample_rate":1000,"seed":42,"epoch":1767225600,
+       "signal":{"type":"sine","frequency":50,"snr_db":30}}' > shared.json
+
+siggen -c shared.json --at 259207000 -n 200 -f csv > a.csv
+sleep 5
+siggen -c shared.json --at 259207000 -n 200 -f csv > b.csv
+cmp a.csv b.csv && echo aligned
+```
+
+`--now` uses the index belonging to the current instant instead, which is what
+two synchronised machines would each do.
+
+### A caveat on the waveforms
+
+Addressed phase is computed as `frac(φ₀ + f·n/fs)` rather than accumulated.
+That gives up two things the accumulator bought: changing the frequency
+mid-stream no longer slides the phase continuously, and the product loses
+resolution as the index grows. The second is negligible — reckoned from the
+Unix epoch, a 50 Hz tone holds its phase to a few hundred nanoseconds, orders
+of magnitude finer than the clock synchronisation that motivates any of this.
+
+### The sequential and indexed streams differ
+
+`next()` draws from a Mersenne Twister; `at()` draws from an indexable
+counter-based generator, because reaching sample *n* of a sequential engine
+means drawing *n* times. They are deliberately different sequences: adding the
+indexed one left the sequential one untouched, so seeds and golden values from
+before it existed still produce the very same numbers. Do not expect
+`take(n)` and `values_at(0, n)` to match — pick one mode per signal.
 
 ## C ABI and Python interface
 
@@ -584,6 +699,12 @@ bit for bit; see <a href="#reproducibility">Reproducibility</a>.
 | `std::unique_ptr<Signal> clone()`        | A polymorphic copy.                         |
 | `from_json` / `from_string` / `from_file`| Build a signal from a JSON document.        |
 | `plot(series, options)`                  | Render a signal as ASCII art.               |
+| `set_epoch(t)` / `epoch()`               | Instant index 0 belongs to; shared anchor.  |
+| `index_at(t)` / `time_at(n)`             | Convert between wall clock and index.       |
+| `bool is_addressable()`                  | Whether `at()` works for this generator.    |
+| `double at(n)`                           | The sample at an absolute index.            |
+| `values_at(n, count)` / `at_range(n, count)` | A block at absolute indices; prefer these. |
+| `double unix_now()`                      | Wall-clock seconds, for driving `index_at`. |
 
 All failures throw `SigGen::SigGenException`, whose `what()` names the offending
 node.

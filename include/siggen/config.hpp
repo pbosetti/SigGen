@@ -303,8 +303,12 @@ inline json evaluate(const json &document) {
 ///
 /// The document is either a bare signal object (carrying a "type" key) or a
 /// wrapper holding the signal under "signal" plus the stream-level settings
-/// "sample_rate" and "seed". Algebraic expressions are evaluated first, so any
-/// numeric field may be written as one.
+/// "sample_rate", "seed" and "epoch". Algebraic expressions are evaluated
+/// first, so any numeric field may be written as one.
+///
+/// "epoch" is what several machines generating one signal together must agree
+/// on, alongside the rate and the seed; put all three in the shared document
+/// and index-addressed samples line up wherever they are produced.
 inline std::unique_ptr<Signal> from_json(const nlohmann::json &document) {
   const nlohmann::json evaluated = detail::evaluate(document);
   if (!evaluated.is_object())
@@ -322,6 +326,12 @@ inline std::unique_ptr<Signal> from_json(const nlohmann::json &document) {
       detail::fail("/sample_rate",
                    "expected a number, got " + std::string(it->type_name()));
     signal->set_sample_rate(it->get<double>());
+  }
+  if (const auto it = evaluated.find("epoch"); it != evaluated.end()) {
+    if (!it->is_number())
+      detail::fail("/epoch",
+                   "expected a number, got " + std::string(it->type_name()));
+    signal->set_epoch(it->get<double>());
   }
   if (const auto it = evaluated.find("seed"); it != evaluated.end()) {
     if (!it->is_number_unsigned())

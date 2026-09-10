@@ -24,6 +24,7 @@ add_executable(siggen_tests
   test_determinism.cpp
   test_plot.cpp
   test_golden.cpp
+  test_epoch.cpp
 )
 target_link_libraries(siggen_tests PRIVATE siggen doctest::doctest)
 
